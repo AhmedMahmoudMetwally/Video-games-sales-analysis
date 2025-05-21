@@ -8,5 +8,3 @@ seaborn
 WordCloud
 networkx 
 scipy
-gradio
-io
