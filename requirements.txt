@@ -8,3 +8,4 @@ seaborn
 WordCloud
 networkx 
 scipy
+statsmodels
