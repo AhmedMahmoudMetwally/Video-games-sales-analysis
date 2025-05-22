@@ -6,7 +6,7 @@ import seaborn as sns
 import scipy.stats as stats
 from sklearn.preprocessing import StandardScaler
 from statsmodels.stats.outliers_influence import variance_inflation_factor # For VIF calculation
-from sklearn.decomposition import PCA # Added for potential future use or discussion
+from sklearn.decomposition import PCA # Added for Principal Component Analysis
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.linear_model import LinearRegression, Ridge, Lasso # Added Ridge and Lasso models
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error # Added MAE
@@ -27,7 +27,7 @@ st.set_page_config(
 # Streamlit's session state is used to persist variables across reruns of the script.
 # This is crucial for storing the trained model, scaler, and processed data.
 if 'scaler' not in st.session_state:
-    st.session_state.scaler = StandardScaler() # Scaler for numerical features
+    st.session_state.scaler = StandardScaler() # Main scaler for numerical features (after PCA if applied)
 if 'publisher_map' not in st.session_state:
     st.session_state.publisher_map = {} # Map for publisher encoding (though not used in X features)
 if 'columns_when_trained' not in st.session_state:
@@ -46,6 +46,16 @@ if 'eda_initialized' not in st.session_state:
     st.session_state.eda_initialized = False # Flag to ensure EDA plot initializes only once per session
 if 'current_eda_option' not in st.session_state:
     st.session_state.current_eda_option = "Sales Distribution" # Default EDA plot option
+
+# PCA specific session states
+if 'pca_model' not in st.session_state:
+    st.session_state.pca_model = None # Stores the fitted PCA object
+if 'pca_scaler' not in st.session_state:
+    st.session_state.pca_scaler = None # Stores the scaler fitted *before* PCA for PCA features
+if 'pca_features_list' not in st.session_state:
+    st.session_state.pca_features_list = [] # Stores the list of features used for PCA
+if 'main_numerical_features_for_scaling' not in st.session_state:
+    st.session_state.main_numerical_features_for_scaling = [] # List of numerical features that the main scaler should operate on (PC1, PC2 or original sales features)
 
 # --- Data Loading Function ---
 def load_data():
@@ -122,13 +132,10 @@ def clean_data(df):
 def feature_engineering(df_clean):
     """
     Performs feature engineering steps including one-hot encoding for categorical variables
-    and selection of features for the model.
-    The scaling of numerical features is performed later, after the train-test split,
-    to prevent data leakage.
+    and selection of features for the model. This function also handles PCA application.
+    Scaling for the main model is done later, after the train-test split.
     """
     # Store unique Platform and Genre values from the cleaned data.
-    # These lists are used to ensure consistent one-hot encoding during prediction,
-    # even if a new input game has a platform/genre not present in the training data.
     st.session_state.original_platforms = df_clean['Platform'].unique().tolist()
     st.session_state.original_genres = df_clean['Genre'].unique().tolist()
 
@@ -137,19 +144,67 @@ def feature_engineering(df_clean):
     df_encoded = pd.get_dummies(df_clean, columns=['Platform', 'Genre'], drop_first=True)
 
     # Label encoding for 'Publisher' (currently not used as a feature in the model's X).
-    # This mapping is stored in session state in case it's needed for future enhancements.
     st.session_state.publisher_map = {publisher: idx for idx, publisher in enumerate(df_clean['Publisher'].unique())}
     df_encoded['Publisher_encoded'] = df_clean['Publisher'].map(st.session_state.publisher_map)
 
-    # Feature selection: Define the features to be used in the regression model.
-    # 'Name', 'Publisher', 'Rank' are irrelevant for numerical prediction.
-    # 'Global_Sales' is the target variable (y).
-    # 'JP_Sales' is excluded because EDA showed weaker correlation with Global_Sales compared to NA/EU sales,
-    # and to simplify the model and potentially reduce multicollinearity.
-    features_to_keep = [col for col in df_encoded.columns
-                        if col not in ['Name', 'Publisher', 'JP_Sales', 'Global_Sales', 'Rank', 'Publisher_encoded']]
+    # --- PCA Implementation ---
+    # Features to be used for Principal Component Analysis (PCA)
+    # These features are highly correlated and will be transformed into fewer, uncorrelated components.
+    pca_features = ['NA_Sales', 'EU_Sales', 'JP_Sales', 'Other_Sales', 'Year']
 
-    X = df_encoded[features_to_keep] # Independent variables (features)
+    # Filter to only existing and numerical features before PCA
+    existing_pca_features = [f for f in pca_features if f in df_encoded.columns and pd.api.types.is_numeric_dtype(df_encoded[f])]
+
+    df_transformed = df_encoded.copy() # Start with a copy of df_encoded for transformations
+
+    if existing_pca_features and len(existing_pca_features) >= 2: # PCA requires at least 2 features
+        # It's crucial to scale data before applying PCA. This scaler is specific to PCA features.
+        temp_pca_scaler = StandardScaler()
+        scaled_features_for_pca = temp_pca_scaler.fit_transform(df_encoded[existing_pca_features])
+
+        pca = PCA(n_components=2) # Reduce to 2 principal components
+        principal_components = pca.fit_transform(scaled_features_for_pca)
+
+        st.session_state.pca_model = pca # Store the fitted PCA model
+        st.session_state.pca_scaler = temp_pca_scaler # Store the scaler used for PCA features
+        st.session_state.pca_features_list = existing_pca_features # Store the list of features used for PCA
+
+        # Create a DataFrame for the principal components, maintaining the original index
+        pca_df = pd.DataFrame(data=principal_components, columns=['PC1', 'PC2'], index=df_encoded.index)
+        st.sidebar.info(f"Applied PCA to {', '.join(existing_pca_features)}, reducing them to 2 principal components (PC1, PC2).")
+        st.sidebar.info(f"Explained variance ratio by PC1: {pca.explained_variance_ratio_[0]:.3f}, PC2: {pca.explained_variance_ratio_[1]:.3f}. Total explained variance: {sum(pca.explained_variance_ratio_):.3f}")
+
+        # Drop the original features that were used in PCA from the DataFrame
+        df_transformed = df_transformed.drop(columns=existing_pca_features)
+        # Concatenate the new PCA features (PC1, PC2) to the transformed DataFrame
+        df_transformed = pd.concat([df_transformed, pca_df], axis=1)
+    else:
+        st.sidebar.warning("Could not apply PCA: specified numerical features for PCA not found, not numeric, or less than 2. Skipping PCA.")
+        # If PCA is skipped, ensure the pca_model and pca_scaler are reset to None
+        st.session_state.pca_model = None
+        st.session_state.pca_scaler = None
+        st.session_state.pca_features_list = []
+        # df_transformed remains df_encoded.copy() which is the base for feature selection below
+
+    # --- End PCA Implementation ---
+
+    # Feature selection: Define the final set of features for the regression model.
+    # This list will include PC1, PC2 if PCA was applied, otherwise the original numerical features
+    # (excluding JP_Sales if PCA was skipped), plus the one-hot encoded categorical features.
+    final_features_for_X = []
+    for col in df_transformed.columns:
+        if col == 'Global_Sales': # Target variable, not a feature
+            continue
+        if col in ['Name', 'Rank', 'Publisher', 'Publisher_encoded']: # Irrelevant for numerical prediction
+            continue
+        # If PCA was applied, original numerical features are already dropped and PC1/PC2 are added.
+        # If PCA was NOT applied, we explicitly exclude 'JP_Sales' as per original logic.
+        if col == 'JP_Sales' and st.session_state.pca_model is None:
+            continue
+        
+        final_features_for_X.append(col)
+
+    X = df_transformed[final_features_for_X] # Independent variables (features)
     y = df_encoded['Global_Sales'] # Dependent variable (target)
 
     # Store the exact column names used for training. This is critical for ensuring
@@ -229,7 +284,7 @@ def show_model_diagnostics(y_test, y_pred):
 # --- Main Analysis and Model Training Function ---
 def run_analysis(df, model_type="Linear Regression", alpha=1.0):
     """
-    Runs the complete analysis pipeline: data cleaning, feature engineering,
+    Runs the complete analysis pipeline: data cleaning, feature engineering (including PCA),
     train-test split, scaling, model training (Linear, Ridge, or Lasso),
     cross-validation, prediction, and evaluation.
     Stores results in session state.
@@ -248,19 +303,30 @@ def run_analysis(df, model_type="Linear Regression", alpha=1.0):
         # This is crucial to evaluate the model's performance on unseen data.
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # Scale numerical features using StandardScaler.
-        # Scaling is applied AFTER train-test split to prevent data leakage from the test set into the training process.
-        num_features = ['NA_Sales', 'EU_Sales', 'Other_Sales', 'Year']
-        # Check if numerical features exist in X_train before fitting the scaler
-        train_num_features_exist = [col for col in num_features if col in X_train.columns]
-        if train_num_features_exist:
-            st.session_state.scaler.fit(X_train[train_num_features_exist]) # Fit scaler only on training data
-            X_train[train_num_features_exist] = st.session_state.scaler.transform(X_train[train_num_features_exist]) # Transform training data
-            # Apply the *fitted* scaler to the test data
-            test_num_features_exist = [col for col in num_features if col in X_test.columns]
-            X_test[test_num_features_exist] = st.session_state.scaler.transform(X_test[test_num_features_exist])
+        # Determine which numerical features the main scaler should operate on.
+        # If PCA was applied, these will be 'PC1', 'PC2'. Otherwise, they are the original numerical sales and year features.
+        if st.session_state.pca_model is not None:
+            st.session_state.main_numerical_features_for_scaling = ['PC1', 'PC2']
         else:
-            st.warning("No numerical features found to scale after cleaning. Check data or cleaning steps.")
+            # These are the original numerical features that were not part of PCA (if PCA was skipped)
+            st.session_state.main_numerical_features_for_scaling = ['NA_Sales', 'EU_Sales', 'Other_Sales', 'Year']
+            # Ensure JP_Sales is not included if it was explicitly excluded from features_to_keep
+            if 'JP_Sales' in st.session_state.main_numerical_features_for_scaling and 'JP_Sales' not in X_train.columns:
+                 st.session_state.main_numerical_features_for_scaling.remove('JP_Sales')
+
+        # Filter the list to only include features actually present in X_train
+        numerical_features_in_X_train = [f for f in st.session_state.main_numerical_features_for_scaling if f in X_train.columns]
+
+        # Scale numerical features using the main StandardScaler.
+        # This scaler handles the final set of numerical features (either original or PCA components).
+        if numerical_features_in_X_train:
+            st.session_state.scaler.fit(X_train[numerical_features_in_X_train]) # Fit scaler only on training data
+            X_train[numerical_features_in_X_train] = st.session_state.scaler.transform(X_train[numerical_features_in_X_train]) # Transform training data
+            # Apply the *fitted* scaler to the test data
+            X_test[numerical_features_in_X_train] = st.session_state.scaler.transform(X_test[numerical_features_in_X_train])
+        else:
+            st.warning("No numerical features found for main scaling after feature engineering. Check data or cleaning steps.")
+
 
         # Model selection and training based on user's choice
         model = None
@@ -332,8 +398,6 @@ def predict_sales(model, input_features):
         input_df = pd.DataFrame([input_features])
         
         # Apply One-Hot Encoding for 'Platform' and 'Genre' based on the original categories
-        # encountered during training. This ensures that the input DataFrame has the same
-        # one-hot encoded columns as the training data, even if a specific category is missing in input.
         for platform_cat in st.session_state.original_platforms:
             input_df[f'Platform_{platform_cat}'] = (input_df['Platform'] == platform_cat).astype(int)
         for genre_cat in st.session_state.original_genres:
@@ -342,30 +406,49 @@ def predict_sales(model, input_features):
         # Drop the original 'Platform' and 'Genre' columns after one-hot encoding
         input_df = input_df.drop(columns=['Platform', 'Genre'])
         
-        # Define numerical features that need to be scaled.
-        # Note: 'JP_Sales' is collected from user input but is NOT used as a feature in the model
-        # (as per the feature_engineering function's design).
-        num_features_to_scale = ['NA_Sales', 'EU_Sales', 'Other_Sales', 'Year']
+        # --- PCA Transformation for Prediction (if PCA was applied during training) ---
+        pca_features_from_training = st.session_state.get('pca_features_list', [])
+        pca_model = st.session_state.get('pca_model', None)
+        pca_scaler = st.session_state.get('pca_scaler', None)
+
+        if pca_model is not None and pca_scaler is not None and pca_features_from_training:
+            # Ensure all PCA features exist in input_df, fill missing with 0.0 if not present
+            for col in pca_features_from_training:
+                if col not in input_df.columns:
+                    input_df[col] = 0.0
+
+            # Scale the PCA-relevant features using the stored PCA scaler
+            scaled_input_for_pca = pca_scaler.transform(input_df[pca_features_from_training])
+            # Apply PCA transformation using the stored PCA model
+            transformed_pca_components = pca_model.transform(scaled_input_for_pca)
+            
+            # Create a temporary DataFrame for PCA components
+            input_pca_df = pd.DataFrame(data=transformed_pca_components, columns=['PC1', 'PC2'], index=input_df.index)
+
+            # Drop the original PCA features from input_df as they are replaced by PC1, PC2
+            input_df = input_df.drop(columns=pca_features_from_training)
+            # Concatenate the new PCA features (PC1, PC2)
+            input_df = pd.concat([input_df, input_pca_df], axis=1)
+        # --- End PCA Transformation for Prediction ---
+
+        # Apply the main StandardScaler (from session state) to the numerical features of the input.
+        # These are the numerical features that the main scaler was fitted on during training
+        # (either original sales/year or PC1/PC2 if PCA was applied).
+        numerical_features_for_main_scaler = st.session_state.get('main_numerical_features_for_scaling', [])
         
-        # Ensure all numerical features exist in input_df before scaling.
-        # If a numerical feature is missing (e.g., due to a data issue), add it with a default value of 0.0.
-        for col in num_features_to_scale:
-            if col not in input_df.columns:
-                input_df[col] = 0.0 # Assign float default to avoid type issues
-        
-        # Apply the *fitted* StandardScaler (from session state) to the numerical features of the input.
-        # This transforms the input data to the same scale as the training data.
+        # Ensure these features exist in the current input_df before scaling
+        features_to_scale_now = [f for f in numerical_features_for_main_scaler if f in input_df.columns]
+
         if st.session_state.scaler is not None and hasattr(st.session_state.scaler, 'scale_'):
-            input_df[num_features_to_scale] = st.session_state.scaler.transform(input_df[num_features_to_scale])
+            if features_to_scale_now: # Only attempt to scale if there are features to scale
+                input_df[features_to_scale_now] = st.session_state.scaler.transform(input_df[features_to_scale_now])
         else:
-            st.error("Scaler not fitted. Please run 'Model Building' first to train the model and fit the scaler.")
-            return None, None # Return None for both prediction and df
+            st.error("Main scaler not fitted. Please run 'Model Building' first to train the model and fit the scaler.")
+            return None, None
         
         # Ensure the final input DataFrame for prediction has the exact same columns and order
         # as the DataFrame used during model training (`st.session_state.columns_when_trained`).
         # This is critical for the model to correctly interpret the input features.
-        # Any columns present in training but not in current input_df (e.g., specific one-hot categories)
-        # will be added with a value of 0.
         final_input_df = pd.DataFrame(0, index=[0], columns=st.session_state.columns_when_trained)
         for col in st.session_state.columns_when_trained:
             if col in input_df.columns:
@@ -604,8 +687,8 @@ def main():
         st.header("Model Building")
         st.markdown("""
         This section allows you to build and evaluate different regression models to predict `Global_Sales`.
-        The pipeline includes data cleaning, feature engineering, data splitting, scaling, model training,
-        cross-validation, and detailed evaluation metrics.
+        The pipeline includes data cleaning, feature engineering (including PCA), data splitting, scaling,
+        model training, cross-validation, and detailed evaluation metrics.
         """)
         
         if df is None:
@@ -649,7 +732,7 @@ def main():
                 st.markdown("""
                 * **R² Score (Coefficient of Determination)**: Represents the proportion of the variance in the dependent variable (Global Sales) that is predictable from the independent variables (features). A value closer to 1 indicates a better fit.
                 * **RMSE (Root Mean Squared Error)**: Measures the average magnitude of the errors. It tells us how concentrated the data points are around the line of best fit. Lower values are better.
-                * **MAE (Mean Absolute Error)**: Measures the average magnitude of the errors, similar to RMSE but less sensitive to outliers. It represents the average absolute difference between actual and predicted values. Lower values are better.
+                * **MAE (Mean Absolute Error)**: Measures the average magnitude of the errors, similar to RMSE but less sensitive to outliers. It represents the average absolute difference between actual and predicted sales. Lower values are better.
                 * **Adjusted R²**: A modified version of R² that has been adjusted for the number of predictors in the model. It increases only if the new term improves the model more than would be expected by chance, making it a better comparison metric for models with different numbers of features.
                 """)
                 
@@ -668,28 +751,18 @@ def main():
                 """)
                 # Checkbox to optionally show VIF data, as it can be large
                 if st.checkbox("Show VIF for Numerical Features"):
-                    numerical_features = ['NA_Sales', 'EU_Sales', 'Other_Sales', 'Year']
-                    # Re-run feature engineering and train-test split to get X_train in this scope
+                    # VIF is calculated on the features that were *not* transformed by PCA, or on the PCA components themselves.
+                    # Here, we calculate VIF on the numerical features that the main scaler operates on.
+                    features_for_vif = st.session_state.main_numerical_features_for_scaling
+                    # Recompute cleaned data and features for VIF calculation
                     df_clean = clean_data(df.copy())
-                    X, y = feature_engineering(df_clean)
-                    if X.empty or y.empty:
-                        st.warning("No data available for VIF calculation after cleaning and feature engineering.")
+                    X, _ = feature_engineering(df_clean)
+                    if features_for_vif and all(f in X.columns for f in features_for_vif):
+                        # Use the scaled X for VIF calculation for consistency
+                        vif_data = calculate_vif(X[features_for_vif])
+                        st.dataframe(vif_data)
                     else:
-                        from sklearn.model_selection import train_test_split
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-                        # Scale numerical features as in model training
-                        train_num_features_exist = [col for col in numerical_features if col in X_train.columns]
-                        if train_num_features_exist:
-                            scaler = StandardScaler()
-                            scaler.fit(X_train[train_num_features_exist])
-                            X_train[train_num_features_exist] = scaler.transform(X_train[train_num_features_exist])
-                        # Ensure all numerical features are present before calculating VIF
-                        if all(col in X_train.columns for col in numerical_features):
-                            X_numerical_scaled = X_train[numerical_features]
-                            vif_data = calculate_vif(X_numerical_scaled)
-                            st.dataframe(vif_data)
-                        else:
-                            st.warning("Could not calculate VIF: Some numerical features are missing after preprocessing.")
+                        st.warning("Could not calculate VIF: Numerical features for VIF not found after preprocessing. This might happen if PCA transformed all numerical features.")
                 
                 st.subheader("Regression Diagnostics")
                 st.markdown("These plots help validate the assumptions of linear regression and provide visual insights into model performance.")
@@ -702,6 +775,7 @@ def main():
                 * A **positive coefficient** means an increase in the feature's value leads to an increase in predicted global sales.
                 * A **negative coefficient** means an increase in the feature's value leads to a decrease in predicted global sales.
                 * Features related to regional sales (e.g., `NA_Sales`, `EU_Sales`, `Other_Sales`) often have the largest coefficients, indicating their strong direct relationship with `Global_Sales`.
+                * If PCA was applied, `PC1` and `PC2` will appear here, and their coefficients represent the impact of changes in these abstract components on global sales.
                 """)
                 
                 st.subheader("Regression Equation")
@@ -736,8 +810,6 @@ def main():
                     year = st.number_input("Release Year", min_value=1980, max_value=2023, value=2010, help="The year the game was released.")
                     
                     # Ensure selectbox options are always lists and populated
-                    # Use original_platforms/genres from session state, which are populated after feature engineering.
-                    # Fallback to df's unique values if model hasn't been trained yet (though warning prevents this path).
                     platform_options = st.session_state.original_platforms if st.session_state.original_platforms else (df['Platform'].unique().tolist() if df is not None else [])
                     genre_options = st.session_state.original_genres if st.session_state.original_genres else (df['Genre'].unique().tolist() if df is not None else [])
                     
@@ -748,8 +820,8 @@ def main():
                     st.markdown("#### Regional Sales (in millions of units)")
                     na_sales = st.number_input("North America Sales (millions)", min_value=0.0, value=1.0, step=0.1, help="Sales in North America in millions of units.")
                     eu_sales = st.number_input("Europe Sales (millions)", min_value=0.0, value=0.5, step=0.1, help="Sales in Europe in millions of units.")
-                    # JP_Sales is collected for user input but not used as a feature in the model (as per feature_engineering)
-                    jp_sales = st.number_input("Japan Sales (millions)", min_value=0.0, value=0.3, step=0.1, help="Sales in Japan in millions of units. Note: JP_Sales is collected but not directly used in this model for prediction.")
+                    # JP_Sales is collected for user input but not directly used as a feature in the model if PCA was applied to it
+                    jp_sales = st.number_input("Japan Sales (millions)", min_value=0.0, value=0.3, step=0.1, help="Sales in Japan in millions of units. Note: If PCA is applied, JP_Sales is used to form principal components, not directly as a feature.")
                     other_sales = st.number_input("Other Regions Sales (millions)", min_value=0.0, value=0.2, step=0.1, help="Sales in other regions of the world in millions of units.")
                 
                 submitted = st.form_submit_button("Predict Global Sales")
@@ -762,7 +834,7 @@ def main():
                         'Genre': genre,
                         'NA_Sales': na_sales,
                         'EU_Sales': eu_sales,
-                        'JP_Sales': jp_sales, # Passed to predict_sales, but predict_sales ignores it in feature prep
+                        'JP_Sales': jp_sales, # Passed to predict_sales for PCA or direct use
                         'Other_Sales': other_sales
                     }
                     
@@ -772,18 +844,21 @@ def main():
                         st.success(f"Predicted Global Sales: **{predicted_sales:.2f} million units**.")
                         
                         # Show how each feature contributed to the prediction
-                        # Ensure final_input_df_for_impact is not None before proceeding
                         if 'model_features' in st.session_state and 'model_coefficients' in st.session_state and final_input_df_for_impact is not None:
                             st.write("### Feature Impacts on Prediction")
-                            st.markdown("This table shows the contribution of each input feature to the final predicted sales value.")
+                            st.markdown("This table shows the contribution of each input feature to the final predicted sales value based on the model's coefficients.")
                             impacts = {}
                             
                             # Calculate impacts for each feature using the already prepared and scaled final_input_df_for_impact
                             for i, feature_name in enumerate(st.session_state.model_features):
                                 coeff = st.session_state.model_coefficients[i]
                                 # Get the scaled value of the feature from the prepared DataFrame
-                                feature_value_scaled = final_input_df_for_impact[feature_name].iloc[0]
-                                impacts[feature_name] = coeff * feature_value_scaled
+                                if feature_name in final_input_df_for_impact.columns:
+                                    feature_value_scaled = final_input_df_for_impact[feature_name].iloc[0]
+                                    impacts[feature_name] = coeff * feature_value_scaled
+                                else:
+                                    # This case should ideally not happen if columns_when_trained is correct
+                                    impacts[feature_name] = 0.0 # Or handle as an error/warning
                             
                             # Add intercept's contribution
                             if 'model_intercept' in st.session_state:
