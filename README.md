@@ -79,3 +79,91 @@ The main goal of this project is to **build a regression model** to **predict th
 * Platform
 * Year
 * Publisher
+
+
+
+
+
+
+**✅What This App Does:**
+This is a video game sales analysis and prediction tool built with Streamlit. It helps you:
+
+Explore video game sales data
+
+Build machine learning models to predict global sales
+
+Make new sales predictions based on game features
+
+**✅Main Parts:**
+
+Data Loading & Cleaning
+
+Loads a CSV file with game sales data
+
+Handles missing values and removes unrealistic data
+
+Filters out extreme sales values (outliers)
+
+Data Analysis (EDA)
+
+Shows sales distributions and trends over time
+
+Displays top-selling games, platforms, and genres
+
+Visualizes relationships between different sales regions
+
+### ✅Model Building
+
+**Offers 3 model types:**
+
+*✅Linear Regression (basic)*
+
+*✅Ridge Regression (reduces overfitting)*
+
+*✅Lasso Regression (can ignore unimportant features)*
+
+Includes PCA (combines related features)
+
+### 🎯Shows model performance metrics (R², RMSE, etc.)
+
+Predictions
+
+Lets you enter new game details
+
+Predicts global sales based on your inputs
+
+Shows which features most affect the prediction
+
+Results Summary
+
+Explains key findings
+
+Lists model strengths and limitations
+
+Shows the final prediction formula
+
+**✅Technical Highlights:**
+
+Uses scikit-learn for machine learning
+
+Implements proper data splitting (train/test)
+
+Handles scaling and feature engineering
+
+Includes cross-validation for reliable results
+
+Provides diagnostic plots to check model quality
+
+**✅🎯How to Use It:**
+
+Upload your data (or use the sample)
+
+Explore the data in the "Exploratory Analysis" section
+
+Build a model in "Model Building"
+
+Make predictions in "Make Predictions"
+
+Review conclusions in "Results Summary"
+
+The app is designed to be user-friendly while providing powerful analysis capabilities for video game sales prediction.
