@@ -1,3 +1,7 @@
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+
+
 Tasks: 
 1. Dataset: 
 Find a dataset containing more than 10,000 records. 
